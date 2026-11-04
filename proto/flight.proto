@@ -1,0 +1,119 @@
+syntax = "proto3";
+
+package flight.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Все методы требуют x-api-key в gRPC metadata. Неверный ключ: UNAUTHENTICATED.
+// Идентификаторы рейсов, резерваций и бронирований — строки UUID.
+service FlightService {
+  // Только SCHEDULED. Без даты ищет по всему маршруту. Нет рейсов — пустой список.
+  // INVALID_ARGUMENT: неверный маршрут или departure_date.
+  rpc SearchFlights(SearchFlightsRequest) returns (SearchFlightsResponse);
+
+  // INVALID_ARGUMENT: неверный flight_id. NOT_FOUND: рейс отсутствует.
+  rpc GetFlight(GetFlightRequest) returns (GetFlightResponse);
+
+  // Атомарно уменьшает остаток мест и создаёт резервацию.
+  // Повтор с тем же booking_id, рейсом и количеством возвращает тот же ACTIVE резерв.
+  // INVALID_ARGUMENT: неверный UUID или seat_count <= 0.
+  // NOT_FOUND: рейс отсутствует. RESOURCE_EXHAUSTED: мест недостаточно.
+  // FAILED_PRECONDITION: рейс не SCHEDULED либо резерв уже завершён.
+  // ALREADY_EXISTS: booking_id использован с другими параметрами.
+  rpc ReserveSeats(ReserveSeatsRequest) returns (ReserveSeatsResponse);
+
+  // Возвращает места ровно один раз. Повтор возвращает текущий RELEASED резерв.
+  // INVALID_ARGUMENT: неверный booking_id. NOT_FOUND: резервация отсутствует.
+  // FAILED_PRECONDITION: резерв истёк.
+  rpc ReleaseReservation(ReleaseReservationRequest) returns (ReleaseReservationResponse);
+
+  // Служебное изменение цены и/или статуса. Маршрут и дата неизменны.
+  // INVALID_ARGUMENT: неверный ID, цена, статус или нет изменений в запросе.
+  // NOT_FOUND: рейс отсутствует.
+  rpc UpdateFlight(UpdateFlightRequest) returns (UpdateFlightResponse);
+}
+
+enum FlightStatus {
+  FLIGHT_STATUS_UNSPECIFIED = 0;
+  FLIGHT_STATUS_SCHEDULED = 1;
+  FLIGHT_STATUS_DEPARTED = 2;
+  FLIGHT_STATUS_CANCELLED = 3;
+  FLIGHT_STATUS_COMPLETED = 4;
+}
+
+enum ReservationStatus {
+  RESERVATION_STATUS_UNSPECIFIED = 0;
+  RESERVATION_STATUS_ACTIVE = 1;
+  RESERVATION_STATUS_RELEASED = 2;
+  RESERVATION_STATUS_EXPIRED = 3;
+}
+
+message Flight {
+  string id = 1;
+  string flight_number = 2;
+  string airline = 3;
+  string origin = 4;
+  string destination = 5;
+  google.protobuf.Timestamp departure_time = 6;
+  google.protobuf.Timestamp arrival_time = 7;
+  int32 total_seats = 8;
+  int32 available_seats = 9;
+  // Цена одного места в копейках (RUB).
+  int64 price_minor = 10;
+  FlightStatus status = 11;
+}
+
+message SeatReservation {
+  string id = 1;
+  string flight_id = 2;
+  string booking_id = 3;
+  int32 seat_count = 4;
+  ReservationStatus status = 5;
+}
+
+message SearchFlightsRequest {
+  string origin = 1;
+  string destination = 2;
+  // Если задана, должна быть полночью UTC. Интервал [дата, дата + 1 день).
+  google.protobuf.Timestamp departure_date = 3;
+}
+
+message SearchFlightsResponse {
+  repeated Flight flights = 1;
+}
+
+message GetFlightRequest {
+  string flight_id = 1;
+}
+
+message GetFlightResponse {
+  Flight flight = 1;
+}
+
+message ReserveSeatsRequest {
+  string flight_id = 1;
+  string booking_id = 2;
+  int32 seat_count = 3;
+}
+
+message ReserveSeatsResponse {
+  SeatReservation reservation = 1;
+}
+
+message ReleaseReservationRequest {
+  string booking_id = 1;
+}
+
+message ReleaseReservationResponse {
+  SeatReservation reservation = 1;
+}
+
+message UpdateFlightRequest {
+  string flight_id = 1;
+  optional int64 price_minor = 2;
+  optional FlightStatus status = 3;
+}
+
+message UpdateFlightResponse {
+  Flight flight = 1;
+}

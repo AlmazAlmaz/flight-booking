@@ -1,0 +1,149 @@
+services:
+  flight-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: flight
+      POSTGRES_PASSWORD: flight
+      POSTGRES_DB: flights
+    volumes:
+      - flight-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -h 127.0.0.1 -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  booking-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: booking
+      POSTGRES_PASSWORD: booking
+      POSTGRES_DB: bookings
+    volumes:
+      - booking-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -h 127.0.0.1 -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  redis-master:
+    image: redis:7.4-alpine
+    dns_opt: ["timeout:1", "attempts:1"]
+    command:
+      - sh
+      - -ec
+      - |
+        if [ ! -f /data/redis.conf ]; then
+          cp /etc/redis/base.conf /data/redis.conf
+          printf '%s\n' 'replica-announce-ip redis-master' >> /data/redis.conf
+        fi
+        exec redis-server /data/redis.conf
+    volumes:
+      - ./infra/redis.conf:/etc/redis/base.conf:ro
+      - redis-master-data:/data
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  redis-replica:
+    image: redis:7.4-alpine
+    dns_opt: ["timeout:1", "attempts:1"]
+    command:
+      - sh
+      - -ec
+      - |
+        if [ ! -f /data/redis.conf ]; then
+          cp /etc/redis/base.conf /data/redis.conf
+          printf '%s\n' 'replicaof redis-master 6379' 'replica-announce-ip redis-replica' >> /data/redis.conf
+        fi
+        exec redis-server /data/redis.conf
+    volumes:
+      - ./infra/redis.conf:/etc/redis/base.conf:ro
+      - redis-replica-data:/data
+    depends_on:
+      redis-master:
+        condition: service_healthy
+
+  redis-sentinel:
+    image: redis:7.4-alpine
+    dns_opt: ["timeout:1", "attempts:1"]
+    command:
+      - sh
+      - -ec
+      - |
+        if [ ! -f /data/sentinel.conf ]; then
+          cp /etc/redis/sentinel.conf /data/sentinel.conf
+        fi
+        exec redis-server /data/sentinel.conf --sentinel
+    volumes:
+      - ./infra/sentinel.conf:/etc/redis/sentinel.conf:ro
+      - redis-sentinel-data:/data
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-replica:
+        condition: service_started
+    healthcheck:
+      test: [CMD, redis-cli, -p, "26379", ping]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  flight-service:
+    build: .
+    command: [python, -m, flight_service.server]
+    environment:
+      DATABASE_URL: postgresql://flight:flight@flight-db:5432/flights
+      API_KEY: ${API_KEY:-local-flight-api-key}
+      REDIS_SENTINEL_HOST: redis-sentinel
+      REDIS_SENTINEL_PORT: "26379"
+      REDIS_MASTER_NAME: flight-redis
+      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-420}
+    depends_on:
+      flight-db:
+        condition: service_healthy
+      redis-sentinel:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:50051:50051"
+    healthcheck:
+      test:
+        [CMD, python, -c, "import grpc; grpc.channel_ready_future(grpc.insecure_channel('127.0.0.1:50051')).result(timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  booking-service:
+    build: .
+    command: [uvicorn, booking_service.app:app, --host, 0.0.0.0, --port, "8000"]
+    environment:
+      DATABASE_URL: postgresql://booking:booking@booking-db:5432/bookings
+      API_KEY: ${API_KEY:-local-flight-api-key}
+      FLIGHT_TARGET: flight-service:50051
+      FLIGHT_RPC_TIMEOUT_SECONDS: ${FLIGHT_RPC_TIMEOUT_SECONDS:-1.0}
+      CIRCUIT_FAILURE_THRESHOLD: ${CIRCUIT_FAILURE_THRESHOLD:-5}
+      CIRCUIT_OPEN_SECONDS: ${CIRCUIT_OPEN_SECONDS:-15}
+      CIRCUIT_WINDOW_SECONDS: ${CIRCUIT_WINDOW_SECONDS:-30}
+    depends_on:
+      booking-db:
+        condition: service_healthy
+      flight-service:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test:
+        [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).close()"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  flight-db-data:
+  booking-db-data:
+  redis-master-data:
+  redis-replica-data:
+  redis-sentinel-data:

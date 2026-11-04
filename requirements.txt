@@ -1,0 +1,7 @@
+fastapi==0.121.3
+uvicorn==0.38.0
+email-validator==2.3.0
+grpcio==1.76.0
+grpcio-tools==1.76.0
+psycopg[binary,pool]==3.2.12
+redis==6.4.0
